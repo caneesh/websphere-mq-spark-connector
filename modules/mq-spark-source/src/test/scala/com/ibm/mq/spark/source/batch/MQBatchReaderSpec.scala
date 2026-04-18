@@ -230,6 +230,60 @@ class MQBatchReaderSpec extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     mockTransport.rollbackCount shouldBe 0
   }
 
+  it should "save checkpoint after successful commit when checkpoint store provided" in {
+    import com.ibm.mq.spark.core.checkpoint.{ConnectorCheckpoint, InMemoryCheckpointStore}
+
+    mockTransport.enqueueMessages(
+      createMessage("aabb01", "payload1"),
+      createMessage("aabb02", "payload2")
+    )
+
+    val checkpointStore = new InMemoryCheckpointStore()
+    val partition = MQInputPartition(0, createOptions())
+    val reader = new MQPartitionReader(
+      partition,
+      MQSchemaProvider.canonicalSchema,
+      () => new DefaultMQClient(mockTransport),
+      Some(checkpointStore)
+    )
+
+    while (reader.next()) {}
+    reader.close()
+
+    val checkpoint = checkpointStore.load("DEV.QUEUE.1", 0).get
+    checkpoint shouldBe defined
+    checkpoint.get.messagesProcessed shouldBe 2
+    checkpoint.get.lastMessageId shouldBe defined
+  }
+
+  it should "not save checkpoint when rollback happens" in {
+    import com.ibm.mq.spark.core.checkpoint.InMemoryCheckpointStore
+
+    mockTransport.enqueueMessages(
+      createMessage("aabb01", "payload1"),
+      createMessage("aabb02", "payload2"),
+      createMessage("aabb03", "payload3")
+    )
+
+    val checkpointStore = new InMemoryCheckpointStore()
+    val options = createOptions(batchSize = 10)
+    val partition = MQInputPartition(0, options)
+    val reader = new MQPartitionReader(
+      partition,
+      MQSchemaProvider.canonicalSchema,
+      () => new DefaultMQClient(mockTransport),
+      Some(checkpointStore)
+    )
+
+    reader.next() shouldBe true
+    reader.next() shouldBe true
+    reader.close()
+
+    val checkpoint = checkpointStore.load("DEV.QUEUE.1", 0).get
+    checkpoint shouldBe empty
+    mockTransport.rollbackCount shouldBe 1
+  }
+
   private def createOptions(batchSize: Int = 1000): MQSourceOptions = {
     MQSourceOptions(
       queueManager = "QM1",

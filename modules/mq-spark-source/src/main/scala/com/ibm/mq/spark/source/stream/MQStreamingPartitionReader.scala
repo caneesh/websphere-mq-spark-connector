@@ -1,6 +1,8 @@
 package com.ibm.mq.spark.source.stream
 
+import com.ibm.mq.spark.core.checkpoint.ConnectorCheckpoint
 import com.ibm.mq.spark.core.client.DefaultMQClient
+import com.ibm.mq.spark.core.interfaces.CheckpointStore
 import com.ibm.mq.spark.core.message.RawMQMessage
 import com.ibm.mq.spark.source.schema.MQRowConverter
 import org.apache.spark.sql.Row
@@ -20,6 +22,13 @@ import org.slf4j.LoggerFactory
  * 2. Reader commits when the expected message count is reached
  * 3. Spark then checkpoints the offset via MQMicroBatchStream.commit()
  * 4. If reader fails, messages are rolled back and redelivered
+ *
+ * Checkpoint Integration:
+ * -----------------------
+ * When a checkpoint store is provided:
+ * 1. After successful MQ commit, connector checkpoint is saved
+ * 2. This is separate from Spark's streaming checkpoint
+ * 3. Provides additional recovery metadata (message IDs, byte counts)
  *
  * Delivery Semantics:
  * - At-least-once: Messages committed to MQ before Spark checkpoint
@@ -44,7 +53,8 @@ import org.slf4j.LoggerFactory
 class MQStreamingPartitionReader(
     partition: MQStreamingPartition,
     schema: StructType,
-    clientFactory: () => DefaultMQClient
+    clientFactory: () => DefaultMQClient,
+    checkpointStore: Option[CheckpointStore] = None
 ) extends PartitionReader[InternalRow] {
 
   private val log = LoggerFactory.getLogger(getClass)
@@ -58,6 +68,9 @@ class MQStreamingPartitionReader(
   private var currentRow: InternalRow = _
   private var initialized = false
   private var messagesRead = 0L
+  private var bytesRead = 0L
+  private var lastMessageId: Option[String] = None
+  private var lastCorrelationId: Option[String] = None
   private var closed = false
   private var readingComplete = false
   private var readingFailed = false
@@ -82,10 +95,7 @@ class MQStreamingPartitionReader(
       }
 
       if (messages.hasNext) {
-        val msg = messages.next()
-        val row = rowConverter.toRow(msg)
-        currentRow = toInternalRow(row)
-        messagesRead += 1
+        processMessage(messages.next())
         checkAndCommit()
         true
       } else {
@@ -147,14 +157,22 @@ class MQStreamingPartitionReader(
 
     if (polled.nonEmpty) {
       messages = polled.iterator
-      val msg = messages.next()
-      val row = rowConverter.toRow(msg)
-      currentRow = toInternalRow(row)
-      messagesRead += 1
+      processMessage(messages.next())
       checkAndCommit()
       true
     } else {
       false
+    }
+  }
+
+  private def processMessage(msg: RawMQMessage): Unit = {
+    val row = rowConverter.toRow(msg)
+    currentRow = toInternalRow(row)
+    messagesRead += 1
+    bytesRead += msg.payload.length
+    lastMessageId = Some(msg.messageIdHex)
+    if (msg.correlationIdHex.nonEmpty) {
+      lastCorrelationId = Some(msg.correlationIdHex)
     }
   }
 
@@ -168,13 +186,41 @@ class MQStreamingPartitionReader(
   }
 
   /**
-   * Mark reading as complete and commit the MQ transaction.
+   * Mark reading as complete, commit the MQ transaction, and save checkpoint.
    */
   private def markReadingComplete(): Unit = {
     if (!readingComplete && !readingFailed) {
       readingComplete = true
-      log.info(s"Micro-batch complete: read $messagesRead messages. Committing MQ transaction.")
+      log.info(s"Micro-batch complete: read $messagesRead messages ($bytesRead bytes). Committing MQ transaction.")
       client.commit()
+
+      saveCheckpoint()
+    }
+  }
+
+  /**
+   * Saves checkpoint after successful commit.
+   */
+  private def saveCheckpoint(): Unit = {
+    checkpointStore.foreach { store =>
+      val checkpoint = ConnectorCheckpoint(
+        queueName = options.queueName,
+        queueManager = options.queueManager,
+        lastMessageId = lastMessageId,
+        lastCorrelationId = lastCorrelationId,
+        lastProcessedTimestamp = System.currentTimeMillis(),
+        messagesProcessed = messagesRead,
+        bytesProcessed = bytesRead,
+        partitionId = partition.partitionId,
+        createdAt = System.currentTimeMillis()
+      )
+
+      store.save(checkpoint) match {
+        case scala.util.Success(_) =>
+          log.debug(s"Checkpoint saved: partition=${partition.partitionId}, messages=$messagesRead")
+        case scala.util.Failure(e) =>
+          log.warn(s"Failed to save checkpoint: ${e.getMessage}. MQ messages already committed.")
+      }
     }
   }
 
