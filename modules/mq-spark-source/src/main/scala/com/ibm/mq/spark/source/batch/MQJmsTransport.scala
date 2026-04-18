@@ -45,18 +45,21 @@ class MQJmsTransport(options: MQSourceOptions) extends MQTransport with Serializ
   }
 
   override def receive(waitMillis: Long): Option[RawMQMessage] = {
-    ensureDelegate()
+    if (delegate == null || !delegate.isConnected) {
+      throw new IllegalStateException("Transport not connected. Call connect() first.")
+    }
     delegate.receive(waitMillis)
   }
 
   override def commit(): Unit = {
-    if (delegate != null) {
-      delegate.commit()
+    if (delegate == null || !delegate.isConnected) {
+      throw new IllegalStateException("Cannot commit: transport not connected")
     }
+    delegate.commit()
   }
 
   override def rollback(): Unit = {
-    if (delegate != null) {
+    if (delegate != null && delegate.isConnected) {
       delegate.rollback()
     }
   }

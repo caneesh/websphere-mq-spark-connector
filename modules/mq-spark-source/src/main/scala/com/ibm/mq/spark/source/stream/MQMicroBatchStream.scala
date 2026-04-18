@@ -61,8 +61,16 @@ class MQMicroBatchStream(
   }
 
   override def planInputPartitions(start: Offset, end: Offset): Array[InputPartition] = {
-    val startOffset = start.asInstanceOf[MQOffset]
-    val endOffset = end.asInstanceOf[MQOffset]
+    val startOffset = start match {
+      case o: MQOffset => o
+      case _ => throw new IllegalArgumentException(
+        s"Expected MQOffset but got ${start.getClass.getName}. This indicates a Spark internal error or incompatible offset format.")
+    }
+    val endOffset = end match {
+      case o: MQOffset => o
+      case _ => throw new IllegalArgumentException(
+        s"Expected MQOffset but got ${end.getClass.getName}. This indicates a Spark internal error or incompatible offset format.")
+    }
 
     val batchesToProcess = (endOffset.batchId - startOffset.batchId).toInt
     if (batchesToProcess <= 0) {
