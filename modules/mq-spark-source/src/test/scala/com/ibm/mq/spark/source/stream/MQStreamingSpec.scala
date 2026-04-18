@@ -18,30 +18,76 @@ class MQStreamingSpec extends AnyFlatSpec with Matchers with BeforeAndAfterEach 
     mockTransport = new MockStreamTransport()
   }
 
-  "MQOffset" should "serialize to JSON" in {
-    val offset = MQOffset(100, 1000L)
+  "MQOffset" should "serialize to JSON with all fields" in {
+    val offset = MQOffset(
+      batchId = 5,
+      processedCount = 500,
+      lastBatchCount = 100,
+      lastBatchTimestamp = 1704067200000L,
+      lastMessageIds = Seq("msg1", "msg2")
+    )
 
     val json = offset.json()
 
-    json should include ("100")
-    json should include ("1000")
+    json should include ("\"batchId\":5")
+    json should include ("\"processedCount\":500")
+    json should include ("\"lastBatchCount\":100")
+    json should include ("\"lastBatchTimestamp\":1704067200000")
+    json should include ("\"lastMessageIds\":[\"msg1\",\"msg2\"]")
   }
 
   it should "deserialize from JSON" in {
+    val json = """{"batchId":5,"processedCount":500,"lastBatchCount":100,"lastBatchTimestamp":1000,"lastMessageIds":["a","b"]}"""
+
+    val offset = MQOffset.fromJson(json)
+
+    offset.batchId shouldBe 5
+    offset.processedCount shouldBe 500
+    offset.lastBatchCount shouldBe 100
+    offset.lastBatchTimestamp shouldBe 1000L
+    offset.lastMessageIds should contain allOf ("a", "b")
+  }
+
+  it should "deserialize legacy format for backwards compatibility" in {
     val json = """{"messageCount":100,"timestamp":1000}"""
 
     val offset = MQOffset.fromJson(json)
 
-    offset.messageCount shouldBe 100
-    offset.timestamp shouldBe 1000L
+    offset.batchId shouldBe 0
+    offset.processedCount shouldBe 0
   }
 
-  it should "support comparison for ordering" in {
-    val offset1 = MQOffset(10, 100L)
-    val offset2 = MQOffset(20, 200L)
+  it should "support comparison for ordering based on batchId" in {
+    val offset1 = MQOffset(batchId = 10, processedCount = 100, lastBatchCount = 10, lastBatchTimestamp = 100L)
+    val offset2 = MQOffset(batchId = 20, processedCount = 200, lastBatchCount = 10, lastBatchTimestamp = 200L)
 
     offset1 < offset2 shouldBe true
     offset2 > offset1 shouldBe true
+  }
+
+  it should "create next batch offset" in {
+    val current = MQOffset(batchId = 5, processedCount = 500, lastBatchCount = 100, lastBatchTimestamp = 1000L)
+
+    val next = current.nextBatch(50, Seq("newMsg1"))
+
+    next.batchId shouldBe 6
+    next.processedCount shouldBe 550
+    next.lastBatchCount shouldBe 50
+    next.lastMessageIds should contain ("newMsg1")
+  }
+
+  it should "limit stored message IDs to 10" in {
+    val ids = (1 to 20).map(i => s"msg$i")
+    val offset = MQOffset.Initial.nextBatch(20, ids)
+
+    offset.lastMessageIds.size shouldBe 10
+  }
+
+  "MQOffset.Initial" should "represent starting state" in {
+    MQOffset.Initial.batchId shouldBe 0
+    MQOffset.Initial.processedCount shouldBe 0
+    MQOffset.Initial.lastBatchCount shouldBe 0
+    MQOffset.Initial.lastMessageIds shouldBe empty
   }
 
   "MQMicroBatchStream" should "return initial offset" in {
@@ -50,60 +96,75 @@ class MQStreamingSpec extends AnyFlatSpec with Matchers with BeforeAndAfterEach 
     val initial = stream.initialOffset()
 
     initial should not be null
-    initial.asInstanceOf[MQOffset].messageCount shouldBe 0
+    initial.asInstanceOf[MQOffset].batchId shouldBe 0
   }
 
   it should "deserialize offset from JSON" in {
     val stream = createStream()
-    val json = """{"messageCount":50,"timestamp":500}"""
+    val json = """{"batchId":5,"processedCount":500,"lastBatchCount":100,"lastBatchTimestamp":1000,"lastMessageIds":[]}"""
 
     val offset = stream.deserializeOffset(json)
 
-    offset.asInstanceOf[MQOffset].messageCount shouldBe 50
+    offset.asInstanceOf[MQOffset].batchId shouldBe 5
+    offset.asInstanceOf[MQOffset].processedCount shouldBe 500
   }
 
   it should "plan partitions for micro-batch" in {
     val stream = createStream()
-    val start = MQOffset(0, 0L)
-    val end = MQOffset(10, 100L)
+    val start = MQOffset.Initial
+    val end = MQOffset.Initial.nextBatch(100)
 
     val partitions = stream.planInputPartitions(start, end)
 
     partitions should have length 1
   }
 
-  it should "report latest offset" in {
+  it should "report latest offset with incremented batchId" in {
     val stream = createStream()
 
-    val offset = stream.latestOffset()
+    val offset1 = stream.latestOffset().asInstanceOf[MQOffset]
+    val offset2 = stream.latestOffset().asInstanceOf[MQOffset]
 
-    offset should not be null
+    offset2.batchId should be > offset1.batchId
   }
 
   it should "commit offset on checkpoint" in {
     val stream = createStream()
-    val offset = MQOffset(100, 1000L)
+    val offset = MQOffset(batchId = 10, processedCount = 1000, lastBatchCount = 100, lastBatchTimestamp = 1000L)
 
     noException should be thrownBy stream.commit(offset)
   }
 
-  "MQStreamingPartition" should "track offset range" in {
-    val partition = MQStreamingPartition(
-      0,
-      MQOffset(0, 0L),
-      MQOffset(10, 100L),
-      createOptions()
-    )
+  it should "return empty partitions when start equals end" in {
+    val stream = createStream()
+    val offset = MQOffset.Initial
 
-    partition.startOffset.messageCount shouldBe 0
-    partition.endOffset.messageCount shouldBe 10
+    val partitions = stream.planInputPartitions(offset, offset)
+
+    partitions shouldBe empty
+  }
+
+  "MQStreamingPartition" should "track offset range" in {
+    val start = MQOffset.Initial
+    val end = MQOffset.Initial.nextBatch(100)
+    val partition = MQStreamingPartition(0, start, end, createOptions())
+
+    partition.startOffset.batchId shouldBe 0
+    partition.endOffset.batchId shouldBe 1
+  }
+
+  it should "report expected message count from options" in {
+    val options = createOptions()
+    val partition = MQStreamingPartition(0, MQOffset.Initial, MQOffset.Initial.nextBatch(100), options)
+
+    partition.expectedMessageCount shouldBe options.batchSize
   }
 
   it should "be serializable for distribution" in {
     val partition = MQStreamingPartition(
       0,
-      MQOffset(0, 0L),
-      MQOffset(10, 100L),
+      MQOffset.Initial,
+      MQOffset.Initial.nextBatch(100),
       createOptions()
     )
 
@@ -117,8 +178,8 @@ class MQStreamingSpec extends AnyFlatSpec with Matchers with BeforeAndAfterEach 
     val ois = new ObjectInputStream(bais)
     val deserialized = ois.readObject().asInstanceOf[MQStreamingPartition]
 
-    deserialized.startOffset.messageCount shouldBe 0
-    deserialized.endOffset.messageCount shouldBe 10
+    deserialized.startOffset.batchId shouldBe 0
+    deserialized.endOffset.batchId shouldBe 1
   }
 
   private def createOptions(): MQSourceOptions = {
