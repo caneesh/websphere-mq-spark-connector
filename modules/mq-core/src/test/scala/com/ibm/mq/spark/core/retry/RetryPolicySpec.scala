@@ -1,5 +1,6 @@
 package com.ibm.mq.spark.core.retry
 
+import com.ibm.mq.spark.core.{MQException => ConnectorMQException}
 import com.ibm.mq.spark.core.message.RawMQMessage
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -86,6 +87,63 @@ class RetryPolicySpec extends AnyFlatSpec with Matchers {
     val classifier = DefaultFailureClassifier()
 
     classifier.classify(new RuntimeException("unknown")) shouldBe a[TransientFailure]
+  }
+
+  "MQ-specific failure classification" should "classify authentication errors as permanent" in {
+    val classifier = DefaultFailureClassifier()
+    val authEx = ConnectorMQException.authenticationFailed("invalid credentials")
+
+    val result = classifier.classify(authEx)
+
+    result shouldBe a[PermanentFailure]
+    result.asInstanceOf[PermanentFailure].message should include("Authentication error")
+  }
+
+  it should "classify configuration errors as permanent" in {
+    val classifier = DefaultFailureClassifier()
+    val configEx = ConnectorMQException.configurationError("missing queue name")
+
+    val result = classifier.classify(configEx)
+
+    result shouldBe a[PermanentFailure]
+    result.asInstanceOf[PermanentFailure].message should include("Configuration error")
+  }
+
+  it should "classify parse errors as permanent" in {
+    val classifier = DefaultFailureClassifier()
+    val parseEx = ConnectorMQException.parseFailed("invalid format")
+
+    val result = classifier.classify(parseEx)
+
+    result shouldBe a[PermanentFailure]
+    result.asInstanceOf[PermanentFailure].message should include("Parse error")
+  }
+
+  it should "classify transport errors as transient" in {
+    val classifier = DefaultFailureClassifier()
+    val transportEx = ConnectorMQException.transportError("connection lost")
+
+    val result = classifier.classify(transportEx)
+
+    result shouldBe a[TransientFailure]
+  }
+
+  it should "classify connection failures as transient" in {
+    val classifier = DefaultFailureClassifier()
+    val connEx = ConnectorMQException.connectionFailed("network unreachable")
+
+    val result = classifier.classify(connEx)
+
+    result shouldBe a[TransientFailure]
+  }
+
+  it should "classify transaction rollback as transient" in {
+    val classifier = DefaultFailureClassifier()
+    val txEx = ConnectorMQException.transactionRolledBack("timeout")
+
+    val result = classifier.classify(txEx)
+
+    result shouldBe a[TransientFailure]
   }
 
   "BackoutTracker" should "detect poison message based on backout count" in {

@@ -1,6 +1,7 @@
 package com.ibm.mq.spark.source.stream
 
-import com.ibm.mq.spark.core.client.MQTransport
+import com.ibm.mq.spark.core.checkpoint.InMemoryCheckpointStore
+import com.ibm.mq.spark.core.client.{DefaultMQClient, MQTransport}
 import com.ibm.mq.spark.core.connection.MQConnectionConfig
 import com.ibm.mq.spark.core.message.RawMQMessage
 import com.ibm.mq.spark.source.MQSourceOptions
@@ -160,6 +161,179 @@ class MQStreamingSpec extends AnyFlatSpec with Matchers with BeforeAndAfterEach 
     partition.expectedMessageCount shouldBe options.batchSize
   }
 
+  "MQStreamingPartitionReader transaction boundary" should "commit when expected count is reached" in {
+    mockTransport.enqueueMessages(
+      createMessage("aa01", "payload1"),
+      createMessage("aa02", "payload2"),
+      createMessage("aa03", "payload3")
+    )
+
+    val options = createOptions().copy(batchSize = 3)
+    val partition = MQStreamingPartition(0, MQOffset.Initial, MQOffset.Initial.nextBatch(3), options)
+    val reader = createStreamingReader(partition)
+
+    var count = 0
+    while (reader.next()) {
+      reader.get()
+      count += 1
+    }
+
+    count shouldBe 3
+    mockTransport.commitCount shouldBe 1
+    mockTransport.rollbackCount shouldBe 0
+
+    reader.close()
+    mockTransport.commitCount shouldBe 1
+  }
+
+  it should "rollback on close if reading did not complete" in {
+    mockTransport.enqueueMessages(
+      createMessage("bb01", "payload1"),
+      createMessage("bb02", "payload2")
+    )
+
+    val options = createOptions().copy(batchSize = 5)
+    val partition = MQStreamingPartition(0, MQOffset.Initial, MQOffset.Initial.nextBatch(5), options)
+    val reader = createStreamingReader(partition)
+
+    reader.next() shouldBe true
+    mockTransport.commitCount shouldBe 0
+
+    reader.close()
+    mockTransport.commitCount shouldBe 0
+    mockTransport.rollbackCount shouldBe 1
+  }
+
+  it should "not commit until expected count is reached" in {
+    mockTransport.enqueueMessages(
+      createMessage("cc01", "payload1"),
+      createMessage("cc02", "payload2"),
+      createMessage("cc03", "payload3"),
+      createMessage("cc04", "payload4"),
+      createMessage("cc05", "payload5")
+    )
+
+    val options = createOptions().copy(batchSize = 5)
+    val partition = MQStreamingPartition(0, MQOffset.Initial, MQOffset.Initial.nextBatch(5), options)
+    val reader = createStreamingReader(partition)
+
+    reader.next() shouldBe true
+    mockTransport.commitCount shouldBe 0
+
+    reader.next() shouldBe true
+    mockTransport.commitCount shouldBe 0
+
+    reader.next() shouldBe true
+    mockTransport.commitCount shouldBe 0
+
+    reader.next() shouldBe true
+    mockTransport.commitCount shouldBe 0
+
+    reader.next() shouldBe true
+    mockTransport.commitCount shouldBe 1
+
+    reader.next() shouldBe false
+    reader.close()
+    mockTransport.rollbackCount shouldBe 0
+  }
+
+  it should "save checkpoint after successful commit when checkpoint store provided" in {
+    mockTransport.enqueueMessages(
+      createMessage("dd01", "payload1"),
+      createMessage("dd02", "payload2")
+    )
+
+    val checkpointStore = new InMemoryCheckpointStore()
+    val options = createOptions().copy(batchSize = 2)
+    val partition = MQStreamingPartition(0, MQOffset.Initial, MQOffset.Initial.nextBatch(2), options)
+    val reader = new MQStreamingPartitionReader(
+      partition,
+      MQSchemaProvider.canonicalSchema,
+      () => new DefaultMQClient(mockTransport),
+      Some(checkpointStore)
+    )
+
+    while (reader.next()) {}
+    reader.close()
+
+    val checkpoint = checkpointStore.load("DEV.QUEUE.1", 0).get
+    checkpoint shouldBe defined
+    checkpoint.get.messagesProcessed shouldBe 2
+  }
+
+  it should "not save checkpoint when rollback happens" in {
+    mockTransport.enqueueMessages(
+      createMessage("ee01", "payload1")
+    )
+
+    val checkpointStore = new InMemoryCheckpointStore()
+    val options = createOptions().copy(batchSize = 5)
+    val partition = MQStreamingPartition(0, MQOffset.Initial, MQOffset.Initial.nextBatch(5), options)
+    val reader = new MQStreamingPartitionReader(
+      partition,
+      MQSchemaProvider.canonicalSchema,
+      () => new DefaultMQClient(mockTransport),
+      Some(checkpointStore)
+    )
+
+    reader.next() shouldBe true
+    reader.close()
+
+    val checkpoint = checkpointStore.load("DEV.QUEUE.1", 0).get
+    checkpoint shouldBe empty
+    mockTransport.rollbackCount shouldBe 1
+  }
+
+  it should "commit after exhausting queue before expected count" in {
+    mockTransport.enqueueMessages(
+      createMessage("ff01", "payload1"),
+      createMessage("ff02", "payload2")
+    )
+
+    val options = createOptions().copy(batchSize = 10)
+    val partition = MQStreamingPartition(0, MQOffset.Initial, MQOffset.Initial.nextBatch(10), options)
+    val reader = createStreamingReader(partition)
+
+    var count = 0
+    while (reader.next()) {
+      count += 1
+    }
+
+    count shouldBe 2
+    mockTransport.commitCount shouldBe 1
+
+    reader.close()
+    mockTransport.rollbackCount shouldBe 0
+  }
+
+  private def createStreamingReader(partition: MQStreamingPartition): MQStreamingPartitionReader = {
+    new MQStreamingPartitionReader(
+      partition,
+      MQSchemaProvider.canonicalSchema,
+      () => new DefaultMQClient(mockTransport)
+    )
+  }
+
+  private def createMessage(msgId: String, payload: String): RawMQMessage = {
+    RawMQMessage(
+      messageId = hexStringToBytes(msgId),
+      correlationId = Array.emptyByteArray,
+      payload = payload.getBytes("UTF-8"),
+      putTimestamp = System.currentTimeMillis(),
+      queueName = "DEV.QUEUE.1",
+      ccsid = 1208,
+      encoding = 546,
+      priority = 4,
+      expiry = -1,
+      backoutCount = 0,
+      format = "MQSTR"
+    )
+  }
+
+  private def hexStringToBytes(hex: String): Array[Byte] = {
+    hex.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
+  }
+
   it should "be serializable for distribution" in {
     val partition = MQStreamingPartition(
       0,
@@ -204,9 +378,20 @@ class MQStreamingSpec extends AnyFlatSpec with Matchers with BeforeAndAfterEach 
 class MockStreamTransport extends MQTransport {
   private var messages: List[RawMQMessage] = Nil
   private var connected: Boolean = false
+  private var _commitCount: Int = 0
+  private var _rollbackCount: Int = 0
+
+  def commitCount: Int = _commitCount
+  def rollbackCount: Int = _rollbackCount
 
   def enqueueMessages(msgs: RawMQMessage*): Unit = {
     messages = messages ++ msgs.toList
+  }
+
+  def reset(): Unit = {
+    messages = Nil
+    _commitCount = 0
+    _rollbackCount = 0
   }
 
   override def connect(config: MQConnectionConfig): Unit = {
@@ -228,7 +413,11 @@ class MockStreamTransport extends MQTransport {
     }
   }
 
-  override def commit(): Unit = {}
+  override def commit(): Unit = {
+    _commitCount += 1
+  }
 
-  override def rollback(): Unit = {}
+  override def rollback(): Unit = {
+    _rollbackCount += 1
+  }
 }
