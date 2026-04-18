@@ -9,7 +9,33 @@ object MQSchemaProvider {
 
   /**
    * Canonical schema with all MQ message fields.
-   * Business-neutral, includes payload and all metadata.
+   *
+   * MQ Metadata Available:
+   * - messageId: Unique 24-byte identifier (MQMD.MsgId)
+   * - correlationId: For request-reply patterns (MQMD.CorrelId)
+   * - payload: Message body as raw bytes
+   * - payloadString: Decoded payload using CCSID
+   * - timestamp: Put timestamp (MQMD.PutDate/PutTime)
+   * - queueName: Source queue name
+   * - ccsid: Character set ID for payload (MQMD.CodedCharSetId)
+   * - encoding: Numeric encoding (MQMD.Encoding)
+   * - priority: Message priority 0-9 (MQMD.Priority)
+   * - expiry: Expiry in tenths of second, -1=unlimited (MQMD.Expiry)
+   * - backoutCount: Redelivery count (MQMD.BackoutCount)
+   * - replyToQueue: Reply destination (MQMD.ReplyToQ)
+   * - replyToQueueManager: Reply queue manager (MQMD.ReplyToQMgr)
+   * - format: Message format descriptor (MQMD.Format)
+   * - persistence: 0=not persistent, 1=persistent (MQMD.Persistence)
+   * - messageType: Request/reply/datagram/report (MQMD.MsgType)
+   * - userId: Putting user ID (MQMD.UserIdentifier)
+   * - applicationName: Putting application (MQMD.PutApplName)
+   * - putApplicationType: Application type code (MQMD.PutApplType)
+   * - groupId: Message group identifier (MQMD.GroupId)
+   * - messageSequenceNumber: Sequence within group (MQMD.MsgSeqNumber)
+   *
+   * Not Available via Standard API:
+   * - Original put timestamp with sub-second precision
+   * - Queue manager internal tracking fields
    */
   val canonicalSchema: StructType = StructType(Seq(
     StructField("messageId", BinaryType, nullable = false),
@@ -30,7 +56,9 @@ object MQSchemaProvider {
     StructField("messageType", IntegerType, nullable = false),
     StructField("userId", StringType, nullable = true),
     StructField("applicationName", StringType, nullable = true),
-    StructField("putApplicationType", IntegerType, nullable = false)
+    StructField("putApplicationType", IntegerType, nullable = false),
+    StructField("groupId", BinaryType, nullable = true),
+    StructField("messageSequenceNumber", IntegerType, nullable = false)
   ))
 
   /**

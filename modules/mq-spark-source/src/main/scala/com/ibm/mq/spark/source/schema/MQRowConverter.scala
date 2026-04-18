@@ -53,6 +53,8 @@ case class MQRowConverter(schema: StructType) {
         case "userId" => (m: RawMQMessage) => m.userId.orNull
         case "applicationName" => (m: RawMQMessage) => m.applicationName.orNull
         case "putApplicationType" => (m: RawMQMessage) => m.putApplicationType
+        case "groupId" => (m: RawMQMessage) => m.groupId.orNull
+        case "messageSequenceNumber" => (m: RawMQMessage) => m.messageSequenceNumber
         case other => (_: RawMQMessage) => null
       }
     }
