@@ -129,6 +129,107 @@ class MQBatchReaderSpec extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     deserialized.options.queueName shouldBe "DEV.QUEUE.1"
   }
 
+  "MQPartitionReader transaction boundary" should "not commit until all messages are read" in {
+    mockTransport.enqueueMessages(
+      createMessage("aabb01", "payload1"),
+      createMessage("aabb02", "payload2")
+    )
+
+    val partition = MQInputPartition(0, createOptions())
+    val reader = createReader(partition)
+
+    reader.next() shouldBe true
+    mockTransport.commitCount shouldBe 0
+
+    reader.next() shouldBe true
+    mockTransport.commitCount shouldBe 0
+
+    reader.next() shouldBe false
+    mockTransport.commitCount shouldBe 1
+
+    reader.close()
+    mockTransport.commitCount shouldBe 1
+    mockTransport.rollbackCount shouldBe 0
+  }
+
+  it should "rollback on close if reading did not complete" in {
+    mockTransport.enqueueMessages(
+      createMessage("aabb01", "payload1"),
+      createMessage("aabb02", "payload2"),
+      createMessage("aabb03", "payload3")
+    )
+
+    val options = createOptions(batchSize = 10)
+    val partition = MQInputPartition(0, options)
+    val reader = createReader(partition)
+
+    reader.next() shouldBe true
+    mockTransport.commitCount shouldBe 0
+
+    reader.close()
+    mockTransport.commitCount shouldBe 0
+    mockTransport.rollbackCount shouldBe 1
+  }
+
+  it should "commit after reaching batch size limit" in {
+    mockTransport.enqueueMessages(
+      createMessage("aabb01", "payload1"),
+      createMessage("aabb02", "payload2"),
+      createMessage("aabb03", "payload3"),
+      createMessage("aabb04", "payload4"),
+      createMessage("aabb05", "payload5")
+    )
+
+    val options = createOptions(batchSize = 3)
+    val partition = MQInputPartition(0, options)
+    val reader = createReader(partition)
+
+    var count = 0
+    while (reader.next()) {
+      count += 1
+    }
+
+    count shouldBe 3
+    mockTransport.commitCount shouldBe 1
+
+    reader.close()
+    mockTransport.commitCount shouldBe 1
+    mockTransport.rollbackCount shouldBe 0
+  }
+
+  it should "commit after exhausting queue before batch limit" in {
+    mockTransport.enqueueMessages(
+      createMessage("aabb01", "payload1"),
+      createMessage("aabb02", "payload2")
+    )
+
+    val options = createOptions(batchSize = 10)
+    val partition = MQInputPartition(0, options)
+    val reader = createReader(partition)
+
+    var count = 0
+    while (reader.next()) {
+      count += 1
+    }
+
+    count shouldBe 2
+    mockTransport.commitCount shouldBe 1
+
+    reader.close()
+    mockTransport.rollbackCount shouldBe 0
+  }
+
+  it should "not commit if no messages were read" in {
+    val partition = MQInputPartition(0, createOptions())
+    val reader = createReader(partition)
+
+    reader.next() shouldBe false
+    mockTransport.commitCount shouldBe 1
+
+    reader.close()
+    mockTransport.rollbackCount shouldBe 0
+  }
+
   private def createOptions(batchSize: Int = 1000): MQSourceOptions = {
     MQSourceOptions(
       queueManager = "QM1",
@@ -172,9 +273,20 @@ class MQBatchReaderSpec extends AnyFlatSpec with Matchers with BeforeAndAfterEac
 class MockBatchTransport extends MQTransport {
   private var messages: List[RawMQMessage] = Nil
   private var connected: Boolean = false
+  private var _commitCount: Int = 0
+  private var _rollbackCount: Int = 0
+
+  def commitCount: Int = _commitCount
+  def rollbackCount: Int = _rollbackCount
 
   def enqueueMessages(msgs: RawMQMessage*): Unit = {
     messages = messages ++ msgs.toList
+  }
+
+  def reset(): Unit = {
+    messages = Nil
+    _commitCount = 0
+    _rollbackCount = 0
   }
 
   override def connect(config: MQConnectionConfig): Unit = {
@@ -196,7 +308,11 @@ class MockBatchTransport extends MQTransport {
     }
   }
 
-  override def commit(): Unit = {}
+  override def commit(): Unit = {
+    _commitCount += 1
+  }
 
-  override def rollback(): Unit = {}
+  override def rollback(): Unit = {
+    _rollbackCount += 1
+  }
 }
