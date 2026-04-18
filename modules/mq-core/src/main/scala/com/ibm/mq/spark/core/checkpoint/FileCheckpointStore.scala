@@ -105,6 +105,20 @@ case class FileCheckpointStore(baseDir: String) extends CheckpointStore {
   }
 
   private def sanitizeName(name: String): String = {
-    name.replace("/", "_").replace("\\", "_").replace(":", "_")
+    if (name == null || name.isEmpty) {
+      throw new IllegalArgumentException("Queue name cannot be null or empty")
+    }
+    name
+      .replace("/", "_")
+      .replace("\\", "_")
+      .replace(":", "_")
+      .replace("..", "_")
+      .replace("<", "_")
+      .replace(">", "_")
+      .replace("|", "_")
+      .replace("*", "_")
+      .replace("?", "_")
+      .replace("\"", "_")
+      .replaceAll("^\\.", "_")
   }
 }

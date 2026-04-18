@@ -189,18 +189,24 @@ class RealMQTransport(queueName: String) extends MQTransport {
     config.sslKeyStorePath.foreach { path =>
       System.setProperty("javax.net.ssl.keyStore", path)
     }
-    config.sslKeyStorePassword.foreach { pwd =>
-      System.setProperty("javax.net.ssl.keyStorePassword", pwd)
+    config.sslKeyStorePassword.foreach { _ =>
+      log.debug("SSL keystore password configured (value redacted)")
+      System.setProperty("javax.net.ssl.keyStorePassword", config.sslKeyStorePassword.get)
     }
     config.sslTrustStorePath.foreach { path =>
       System.setProperty("javax.net.ssl.trustStore", path)
     }
-    config.sslTrustStorePassword.foreach { pwd =>
-      System.setProperty("javax.net.ssl.trustStorePassword", pwd)
+    config.sslTrustStorePassword.foreach { _ =>
+      log.debug("SSL truststore password configured (value redacted)")
+      System.setProperty("javax.net.ssl.trustStorePassword", config.sslTrustStorePassword.get)
     }
 
     props.put(CMQC.CONNECT_OPTIONS_PROPERTY,
       CMQC.MQCNO_RECONNECT_Q_MGR.asInstanceOf[java.lang.Integer])
+
+    if (config.connectTimeout > 0) {
+      props.put("connectTimeout", config.connectTimeout.asInstanceOf[java.lang.Long])
+    }
 
     props
   }
