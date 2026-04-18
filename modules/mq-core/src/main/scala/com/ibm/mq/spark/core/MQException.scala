@@ -65,4 +65,34 @@ object MQException {
    */
   def configurationInvalid(errors: List[String]): MQException =
     new MQException(s"Invalid configuration: ${errors.mkString(", ")}")
+
+  /**
+   * Creates an MQException for configuration errors.
+   */
+  def configurationError(message: String, cause: Throwable = null): MQException =
+    new MQException(s"Configuration error: $message", cause)
+
+  /**
+   * Creates an MQException for authentication failures.
+   */
+  def authenticationFailed(message: String, cause: Throwable = null): MQException =
+    new MQException(s"Authentication failed: $message", cause)
+
+  /**
+   * Creates an MQException for transport-level errors.
+   */
+  def transportError(message: String, cause: Throwable = null): MQException =
+    new MQException(s"Transport error: $message", cause)
+
+  /**
+   * Creates an MQException for transaction rollback.
+   */
+  def transactionRolledBack(message: String, cause: Throwable = null): MQException =
+    new MQException(s"Transaction rolled back: $message", cause)
+
+  /**
+   * Creates an MQException for parse failures.
+   */
+  def parseFailed(message: String, cause: Throwable = null): MQException =
+    new MQException(s"Parse failed: $message", cause)
 }

@@ -1,34 +1,63 @@
 package com.ibm.mq.spark.source.batch
 
-import com.ibm.mq.spark.core.client.MQTransport
-import com.ibm.mq.spark.core.config.MQSecurityConfig
+import com.ibm.mq.spark.core.client.{MQTransport, RealMQTransport}
 import com.ibm.mq.spark.core.connection.MQConnectionConfig
 import com.ibm.mq.spark.core.message.RawMQMessage
 import com.ibm.mq.spark.source.MQSourceOptions
 
 /**
- * MQ Transport implementation using IBM MQ JMS client.
- * This is a placeholder that would integrate with real IBM MQ libraries.
+ * MQ Transport adapter for Spark source integration.
+ *
+ * This class wraps RealMQTransport and provides Serializable support
+ * needed for Spark executor serialization. The actual transport is
+ * created lazily on the executor side.
+ *
+ * Note: The transport instance itself is not serialized. Only the
+ * configuration (options) is serialized, and the transport is
+ * recreated on each executor.
  */
 class MQJmsTransport(options: MQSourceOptions) extends MQTransport with Serializable {
 
-  @transient private var connected: Boolean = false
+  @transient private var delegate: RealMQTransport = _
+  @transient private var currentConfig: MQConnectionConfig = _
+
+  private def ensureDelegate(): Unit = {
+    if (delegate == null) {
+      delegate = new RealMQTransport(options.queueName)
+    }
+  }
 
   override def connect(config: MQConnectionConfig): Unit = {
-    connected = true
+    ensureDelegate()
+    currentConfig = config
+    delegate.connect(config)
   }
 
   override def disconnect(): Unit = {
-    connected = false
+    if (delegate != null) {
+      delegate.disconnect()
+      delegate = null
+    }
   }
 
-  override def isConnected: Boolean = connected
+  override def isConnected: Boolean = {
+    delegate != null && delegate.isConnected
+  }
 
   override def receive(waitMillis: Long): Option[RawMQMessage] = {
-    None
+    ensureDelegate()
+    delegate.receive(waitMillis)
   }
 
-  override def commit(): Unit = {}
+  override def commit(): Unit = {
+    if (delegate != null) {
+      delegate.commit()
+    }
+  }
 
-  override def rollback(): Unit = {}
+  override def rollback(): Unit = {
+    if (delegate != null) {
+      delegate.rollback()
+    }
+  }
 }
